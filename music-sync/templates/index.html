@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Music Sync Control</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            height: 100vh;
+            margin: 0;
+            background-color: #f4f7f6;
+            color: #333;
+        }
+        .container {
+            text-align: center;
+            background: white;
+            padding: 2rem 3rem;
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.1);
+        }
+        h1 { margin-top: 0; font-weight: 600; }
+        .controls { display: flex; gap: 15px; margin-top: 1.5rem; justify-content: center; }
+        button { padding: 12px 24px; font-size: 16px; cursor: pointer; border: none; border-radius: 8px; background-color: #007bff; color: white; transition: background-color 0.2s ease; }
+        button:hover { background-color: #0056b3; }
+        #music-select { padding: 12px; font-size: 16px; border-radius: 8px; border: 1px solid #ccc; min-width: 250px; }
+        #status { margin-bottom: 1.5rem; font-size: 1.1rem; }
+        #status span { font-weight: bold; color: #007bff; }
+        .info { margin-top: 1.5rem; font-size: 0.9rem; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Music Sync Control</h1>
+        <div id="status">
+            <p>Connected Devices: <span id="client-count">0</span></p>
+        </div>
+        <div class="music-selection">
+            <select id="music-select" aria-label="Select a song"></select>
+        </div>
+        <div class="controls">
+            <button onclick="sendControl('play')">Play</button>
+            <button onclick="sendControl('pause')">Pause</button>
+            <button onclick="sendControl('resume')">Resume</button>
+            <button onclick="sendControl('stop')">Stop</button>
+        </div>
+        <div class="info">
+            <p>Place your .mp3 files in the 'music' folder and refresh.</p>
+        </div>
+    </div>
+
+    <script>
+        // --- Web Audio API Setup ---
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        const audioContext = new AudioContext();
+        let audioBuffer = null;
+        let sourceNode = null;
+        let audioData = [];
+        let isStreaming = false;
+
+        // --- Socket.IO Connection ---
+        const socket = io();
+
+        socket.on('connect', () => {
+            console.log('Connected to server!');
+            socket.emit('get_status', {});
+        });
+
+        socket.on('status', (data) => {
+            document.getElementById('client-count').innerText = data.connected_clients;
+        });
+
+        // --- Command and Audio Handling ---
+        socket.on('command', (data) => {
+            const action = data.action;
+            console.log('Received command:', action);
+
+            if (action === 'song') {
+                // Server is starting a new song, reset everything
+                isStreaming = true;
+                audioData = [];
+                if (sourceNode) {
+                    sourceNode.stop();
+                }
+            } else if (action === 'end_stream') {
+                // Server finished sending the file, decode and play
+                isStreaming = false;
+                if (audioData.length > 0) {
+                    const totalLength = audioData.reduce((acc, val) => acc + val.length, 0);
+                    const completeBuffer = new Uint8Array(totalLength);
+                    let offset = 0;
+                    for (const chunk of audioData) {
+                        completeBuffer.set(chunk, offset);
+                        offset += chunk.length;
+                    }
+                    
+                    audioContext.decodeAudioData(completeBuffer.buffer, (buffer) => {
+                        audioBuffer = buffer;
+                        playAudio();
+                    }, (e) => console.error("Error decoding audio data", e));
+                }
+            } else if (action === 'pause') {
+                if (sourceNode) audioContext.suspend();
+            } else if (action === 'resume') {
+                if (sourceNode) audioContext.resume();
+            } else if (action === 'stop') {
+                if (sourceNode) {
+                    sourceNode.stop();
+                    sourceNode = null;
+                }
+            }
+        });
+
+        socket.on('audio_chunk', (chunk) => {
+            if (isStreaming) {
+                // Chunks are ArrayBuffers from the server
+                audioData.push(new Uint8Array(chunk));
+            }
+        });
+
+        function playAudio() {
+            if (!audioBuffer) return;
+            if (sourceNode) {
+                sourceNode.stop();
+            }
+            sourceNode = audioContext.createBufferSource();
+            sourceNode.buffer = audioBuffer;
+            sourceNode.connect(audioContext.destination);
+            sourceNode.start(0);
+        }
+
+        // --- UI Interaction ---
+        function sendControl(command) {
+            let payload = { command: command };
+            if (command === 'play') {
+                const filename = document.getElementById('music-select').value;
+                if (!filename || filename === 'no-music') {
+                    alert('Please select a music file to play.');
+                    return;
+                }
+                payload.filename = filename;
+            }
+            socket.emit('control_music', payload);
+        }
+
+        function loadMusicFiles() {
+            fetch('/music')
+                .then(response => response.json())
+                .then(data => {
+                    const musicSelect = document.getElementById('music-select');
+                    musicSelect.innerHTML = '';
+                    if (data.files.length === 0) {
+                        const option = document.createElement('option');
+                        option.value = 'no-music';
+                        option.text = 'No music files found';
+                        musicSelect.add(option);
+                    } else {
+                        data.files.forEach(file => {
+                            const option = document.createElement('option');
+                            option.value = file;
+                            option.text = file;
+                            musicSelect.add(option);
+                        });
+                    }
+                });
+        }
+
+        window.onload = loadMusicFiles;
+    </script>
+</body>
+</html>
